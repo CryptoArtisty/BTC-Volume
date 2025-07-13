@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>BTC Volume Acceleration Heatmap</title>
+  <script src="https://unpkg.com/lightweight-charts@4.0.0/dist/lightweight-charts.standalone.production.js"></script>
+  <style>
+    body {
+      margin: 0;
+      padding: 10px;
+      font-family: Arial;
+    }
+    #chart-container {
+      width: 100%;
+      height: 60vh;
+      position: relative;
+    }
+    #orderbook-container {
+      width: 100%;
+      height: 20vh;
+      margin-top: 10px;
+      display: flex;
+    }
+    #bids, #asks {
+      width: 50%;
+      height: 100%;
+    }
+    #controls {
+      margin: 10px 0;
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .timeframe-btn {
+      padding: 5px 10px;
+      cursor: pointer;
+    }
+    .timeframe-btn.active {
+      background: #ff9800;
+      font-weight: bold;
+    }
+    .toggle-btn {
+      padding: 5px 10px;
+      background: #4CAF50;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .toggle-btn.off {
+      background: #f44336;
+    }
+    .orderbook-title {
+      text-align: center;
+      font-weight: bold;
+      padding: 5px;
+    }
+    .bid-row, .ask-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 2px 5px;
+      font-size: 12px;
+    }
+    .depth-bar {
+      height: 100%;
+      position: absolute;
+      top: 0;
+      z-index: -1;
+    }
+    .row-container {
+      position: relative;
+    }
+    #volume-info {
+      margin: 10px 0;
+      padding: 10px;
+      background: #f5f5f5;
+      border-radius: 5px;
+    }
+    .heatmap-legend {
+      display: flex;
+      justify-content: space-between;
+      margin-top: 5px;
+      font-size: 10px;
+    }
+    .tooltip {
+      position: absolute;
+      padding: 8px;
+      background: rgba(0, 0, 0, 0.8);
+      color: white;
+      border-radius: 4px;
+      pointer-events: none;
+      font-size: 12px;
+      z-index: 1000;
+      display: none;
+    }
+    .spread-marker {
+      position: absolute;
+      width: 100%;
+      text-align: center;
+      font-size: 10px;
+      pointer-events: none;
+      z-index: 100;
+    }
+    .bid-spread {
+      color: #26a69a;
+    }
+    .ask-spread {
+      color: #ef5350;
+    }
+    .control-group {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      margin-right: 15px;
+    }
+  </style>
+</head>
+<body>
+  <h2>BTC Volume Acceleration Heatmap</h2>
+  <div id="controls">
+    <div class="control-group">
+      <div id="timeframe-selector">
+        <button class="timeframe-btn" data-tf="1d">Daily</button>
+        <button class="timeframe-btn" data-tf="4h">4H</button>
+        <button class="timeframe-btn active" data-tf="1h">1H</button>
+        <button class="timeframe-btn" data-tf="15m">15M</button>
+      </div>
+    </div>
+    <div class="control-group">
+      <button id="heatmap-toggle" class="toggle-btn">Heatmap ON</button>
+      <button id="volume-toggle" class="toggle-btn">Volume ON</button>
+    </div>
+  </div>
+  <div id="volume-info">
+    <div>Volume Acceleration: <span id="volume-acceleration">Loading...</span></div>
+    <div>Current Volume: <span id="current-volume">-</span></div>
+  </div>
+  <div id="chart-container"></div>
+  <div id="orderbook-container">
+    <div id="bids">
+      <div class="orderbook-title">Bids (Buy Orders)</div>
+      <div id="bids-list"></div>
+      <div class="heatmap-legend">
+        <span>Low Volume</span>
+        <span>High Volume</span>
+      </div>
+    </div>
+    <div id="asks">
+      <div class="orderbook-title">Asks (Sell Orders)</div>
+      <div id="asks-list"></div>
+      <div class="heatmap-legend">
+        <span>Low Volume</span>
+        <span>High Volume</span>
+      </div>
+    </div>
+  </div>
+  <div id="tooltip" class="tooltip"></div>
+
+  <script>
+    // Chart variables
+    let chart;
+    let candleSeries;
+    let volumeSeries;
+    let currentTimeframe = '1h';
+    let orderBook = { bids: [], asks: [] };
+    let lastPrice = 0;
+    let priceRange = { min: 0, max: 0 };
+    let heatmapEnabled = true;
+    let volumeEnabled = true;
+    let candleMarkers = [];
+    let spreadMarkers = [];
+    let currentCandles = [];
+    let volumeData = [];
+    let volumeAcceleration = [];
+    
+    // Initialize chart
+    function initChart() {
+      const container = document.getElementById('chart-container');
+      
+      // Clear previous chart if exists
+      if (chart) {
+        container.innerHTML = '';
+      }
+      
+      // Create new chart
+      chart = LightweightCharts.createChart(container, {
+        layout: {
+          backgroundColor: '#ffffff',
+          textColor: '#333',
+        },
+        grid: {
+          vertLines: { color: 'rgba(0, 0, 0, 0.1)' },
+          horzLines: { color: 'rgba(0, 0, 0, 0.1)' },
+        },
+        width: container.clientWidth,
+        height: container.clientHeight,
+      });
+      
+      candleSeries = chart.addCandlestickSeries({
+        upColor: '#26a69a',
+        downColor: '#ef5350',
+        borderVisible: false,
+        wickUpColor: '#26a69a',
+        wickDownColor: '#ef5350',
+      });
+      
+      volumeSeries = chart.addHistogramSeries({
+        color: '#26a69a',
+        priceFormat: {
+          type: 'volume',
+        },
+        priceScaleId: '',
+        scaleMargins: {
+          top: 0.8,
+          bottom: 0,
+        },
+      });
+      
+      // Set initial volume visibility
+      volumeSeries.applyOptions({
+        visible: volumeEnabled
+      });
+      
+      // Resize handler
+      function handleResize() {
+        chart.applyOptions({ width: container.clientWidth, height: container.clientHeight });
+      }
+      
+      window.addEventListener('resize', handleResize);
+      
+      loadData(currentTimeframe);
+      loadOrderBook();
+      
+      // Update order book every 5 seconds
+      setInterval(loadOrderBook, 5000);
+    }
+    
+    // Color gradient functions for volume acceleration
+    function getVolumeColor(intensity, isPositive) {
+      intensity = Math.min(1, Math.max(0, intensity));
+      if (isPositive) {
+        // Green for positive acceleration
+        const hue = 120;
+        const saturation = 80 + (intensity * 20);
+        const lightness = 80 - (intensity * 50);
+        return `hsla(${hue}, ${saturation}%, ${lightness}%, ${0.3 + intensity * 0.7})`;
+      } else {
+        // Red for negative acceleration
+        const hue = 0;
+        const saturation = 80 + (intensity * 20);
+        const lightness = 80 - (intensity * 50);
+        return `hsla(${hue}, ${saturation}%, ${lightness}%, ${0.3 + intensity * 0.7})`;
+      }
+    }
+    
+    // Calculate volume acceleration between candles
+    function calculateVolumeAcceleration(candles, volumes) {
+      if (candles.length < 2) return [];
+      
+      const acceleration = [];
+      
+      // First candle has no acceleration
+      acceleration.push({
+        time: candles[0].time,
+        value: 0,
+        isPositive: true
+      });
+      
+      for (let i = 1; i < candles.length; i++) {
+        const prevVolume = volumes[i-1].value;
+        const currentVolume = volumes[i].value;
+        const volumeChange = currentVolume - prevVolume;
+        const isPositive = volumeChange >= 0;
+        
+        // Normalize the acceleration value (0-1 range)
+        const maxVolume = Math.max(...volumes.map(v => v.value));
+        const normalizedValue = Math.min(1, Math.abs(volumeChange) / (maxVolume * 0.5));
+        
+        acceleration.push({
+          time: candles[i].time,
+          value: normalizedValue,
+          isPositive: isPositive
+        });
+      }
+      
+      return acceleration;
+    }
+    
+    // Apply volume acceleration visualization to candles
+    function applyVolumeAcceleration(candles, volumes) {
+      currentCandles = candles;
+      volumeData = volumes;
+      volumeAcceleration = calculateVolumeAcceleration(candles, volumes);
+      
+      if (!heatmapEnabled) {
+        candleSeries.setMarkers([]);
+        return;
+      }
+      
+      candleMarkers = [];
+      spreadMarkers = [];
+      
+      candles.forEach((candle, index) => {
+        const segments = 10; // Number of horizontal slices per candle
+        const height = candle.high - candle.low;
+        const segmentHeight = height / segments;
+        
+        // Get volume acceleration for this candle
+        const accel = volumeAcceleration[index] || { value: 0, isPositive: true };
+        
+        // Create segments
+        for (let i = 0; i < segments; i++) {
+          const price = candle.low + (i * segmentHeight);
+          const nextPrice = candle.low + ((i + 1) * segmentHeight);
+          const midPrice = (price + nextPrice) / 2;
+          
+          // Determine segment color based on volume acceleration
+          let color = getVolumeColor(accel.value, accel.isPositive);
+          
+          // Add marker for this segment
+          candleMarkers.push({
+            time: candle.time,
+            position: 'inBar',
+            color: color,
+            shape: 'square',
+            size: 2,
+            price: midPrice,
+            acceleration: accel
+          });
+        }
+        
+        // Add markers for highest and lowest volume acceleration in this candle
+        if (index > 0) {
+          const prevAccel = volumeAcceleration[index-1] || { value: 0, isPositive: true };
+          const currentAccel = volumeAcceleration[index] || { value: 0, isPositive: true };
+          
+          const accelerationChange = currentAccel.value - prevAccel.value;
+          const isAccelerating = accelerationChange > 0;
+          
+          // Marker for volume acceleration direction
+          spreadMarkers.push({
+            time: candle.time,
+            position: isAccelerating ? 'aboveBar' : 'belowBar',
+            color: isAccelerating ? '#26a69a' : '#ef5350',
+            shape: isAccelerating ? 'arrowUp' : 'arrowDown',
+            size: 1,
+            price: isAccelerating ? candle.high * 1.01 : candle.low * 0.99,
+            text: `Vol Accel: ${(accelerationChange * 100).toFixed(2)}%`,
+            type: isAccelerating ? 'accel' : 'decel'
+          });
+        }
+      });
+      
+      candleSeries.setMarkers([...candleMarkers, ...spreadMarkers]);
+      setupTooltips();
+      
+      // Update volume info display
+      if (volumeAcceleration.length > 0) {
+        const latestAccel = volumeAcceleration[volumeAcceleration.length - 1];
+        document.getElementById('volume-acceleration').textContent = 
+          `${(latestAccel.value * 100).toFixed(2)}% ${latestAccel.isPositive ? '↑' : '↓'}`;
+        
+        if (volumes.length > 0) {
+          document.getElementById('current-volume').textContent = 
+            `${volumes[volumes.length - 1].value.toFixed(2)} BTC`;
+        }
+      }
+    }
+    
+    // Setup tooltips for markers
+    function setupTooltips() {
+      const container = document.getElementById('chart-container');
+      const tooltip = document.getElementById('tooltip');
+      
+      // Clear previous event listeners
+      container.removeEventListener('mousemove', handleMouseMove);
+      container.removeEventListener('mouseout', handleMouseOut);
+      
+      function handleMouseMove(e) {
+        const rect = container.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        
+        const price = chart.series()[0].coordinateToPrice(y);
+        const time = chart.timeScale().coordinateToTime(x);
+        
+        // Find the closest marker
+        let closestMarker = null;
+        let minDistance = Infinity;
+        
+        [...candleMarkers, ...spreadMarkers].forEach(marker => {
+          const markerX = chart.timeScale().timeToCoordinate(marker.time);
+          const markerY = chart.series()[0].priceToCoordinate(marker.price);
+          
+          if (markerX !== null && markerY !== null) {
+            const distance = Math.sqrt(Math.pow(x - markerX, 2) + Math.pow(y - markerY, 2));
+            if (distance < 20 && distance < minDistance) {
+              minDistance = distance;
+              closestMarker = marker;
+            }
+          }
+        });
+        
+        if (closestMarker) {
+          const markerX = chart.timeScale().timeToCoordinate(closestMarker.time);
+          const markerY = chart.series()[0].priceToCoordinate(closestMarker.price);
+          
+          tooltip.style.display = 'block';
+          tooltip.style.left = `${markerX + rect.left}px`;
+          tooltip.style.top = `${markerY + rect.top}px`;
+          
+          if (closestMarker.acceleration) {
+            const accel = closestMarker.acceleration;
+            tooltip.innerHTML = `
+              <div>Volume Acceleration: ${(accel.value * 100).toFixed(2)}%</div>
+              <div>Direction: ${accel.isPositive ? 'Increasing' : 'Decreasing'}</div>
+              <div>Price: ${closestMarker.price.toFixed(2)}</div>
+            `;
+          } else if (closestMarker.text) {
+            tooltip.innerHTML = closestMarker.text;
+          }
+        } else {
+          tooltip.style.display = 'none';
+        }
+      }
+      
+      function handleMouseOut() {
+        tooltip.style.display = 'none';
+      }
+      
+      container.addEventListener('mousemove', handleMouseMove);
+      container.addEventListener('mouseout', handleMouseOut);
+    }
+    
+    // Load candlestick data
+    function loadData(timeframe) {
+      const apiTimeframe = timeframe === '1W' ? '1w' : timeframe;
+      const limit = timeframe === '1d' ? 90 : 200;
+      
+      fetch(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${apiTimeframe}&limit=${limit}`)
+        .then(res => res.json())
+        .then(data => {
+          const candles = data.map(d => ({
+            time: d[0] / 1000,
+            open: parseFloat(d[1]),
+            high: parseFloat(d[2]),
+            low: parseFloat(d[3]),
+            close: parseFloat(d[4]),
+          }));
+          
+          const volumes = data.map(d => ({
+            time: d[0] / 1000,
+            value: parseFloat(d[5]),
+            color: parseFloat(d[4]) >= parseFloat(d[1]) ? '#26a69a' : '#ef5350'
+          }));
+          
+          candleSeries.setData(candles);
+          volumeSeries.setData(volumes);
+          
+          // Store last price
+          if (candles.length > 0) {
+            lastPrice = candles[candles.length - 1].close;
+          }
+          
+          // Initialize price range
+          if (candles.length > 0) {
+            const prices = candles.flatMap(c => [c.high, c.low]);
+            priceRange.min = Math.min(...prices) * 0.99;
+            priceRange.max = Math.max(...prices) * 1.01;
+          }
+          
+          // Apply volume acceleration visualization
+          applyVolumeAcceleration(candles, volumes);
+          
+          console.log(`Loaded ${timeframe} data successfully`);
+        })
+        .catch(err => {
+          console.error(`Error loading ${timeframe} data:`, err);
+        });
+    }
+    
+    // Load order book data
+    function loadOrderBook() {
+      fetch('https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=50')
+        .then(res => res.json())
+        .then(data => {
+          orderBook.bids = data.bids.map(b => [parseFloat(b[0]), parseFloat(b[1])]);
+          orderBook.asks = data.asks.map(a => [parseFloat(a[0]), parseFloat(a[1])]);
+          
+          updateOrderBookDisplay();
+          
+          // Reapply volume acceleration with new data
+          if (candleSeries && currentCandles.length > 0) {
+            applyVolumeAcceleration(currentCandles, volumeData);
+          }
+        })
+        .catch(err => {
+          console.error('Error loading order book:', err);
+        });
+    }
+    
+    // Update order book display
+    function updateOrderBookDisplay() {
+      const bidsList = document.getElementById('bids-list');
+      const asksList = document.getElementById('asks-list');
+      
+      bidsList.innerHTML = '';
+      asksList.innerHTML = '';
+      
+      // Find max volume for scaling
+      const maxBidVolume = Math.max(...orderBook.bids.map(b => b[1]));
+      const maxAskVolume = Math.max(...orderBook.asks.map(a => a[1]));
+      
+      // Display bids (highest first)
+      orderBook.bids.sort((a, b) => b[0] - a[0]).forEach(bid => {
+        const row = document.createElement('div');
+        row.className = 'row-container';
+        
+        const depthBar = document.createElement('div');
+        depthBar.className = 'depth-bar';
+        depthBar.style.width = `${(bid[1] / maxBidVolume) * 100}%`;
+        depthBar.style.background = '#26a69a';
+        
+        const content = document.createElement('div');
+        content.className = 'bid-row';
+        content.innerHTML = `
+          <span>${bid[0].toFixed(2)}</span>
+          <span>${bid[1].toFixed(4)}</span>
+        `;
+        
+        row.appendChild(depthBar);
+        row.appendChild(content);
+        bidsList.appendChild(row);
+      });
+      
+      // Display asks (lowest first)
+      orderBook.asks.sort((a, b) => a[0] - b[0]).forEach(ask => {
+        const row = document.createElement('div');
+        row.className = 'row-container';
+        
+        const depthBar = document.createElement('div');
+        depthBar.className = 'depth-bar';
+        depthBar.style.width = `${(ask[1] / maxAskVolume) * 100}%`;
+        depthBar.style.background = '#ef5350';
+        
+        const content = document.createElement('div');
+        content.className = 'ask-row';
+        content.innerHTML = `
+          <span>${ask[0].toFixed(2)}</span>
+          <span>${ask[1].toFixed(4)}</span>
+        `;
+        
+        row.appendChild(depthBar);
+        row.appendChild(content);
+        asksList.appendChild(row);
+      });
+    }
+    
+    // Toggle heatmap visibility
+    document.getElementById('heatmap-toggle').addEventListener('click', function() {
+      heatmapEnabled = !heatmapEnabled;
+      this.textContent = heatmapEnabled ? 'Heatmap ON' : 'Heatmap OFF';
+      this.classList.toggle('off', !heatmapEnabled);
+      
+      if (candleSeries && currentCandles.length > 0) {
+        applyVolumeAcceleration(currentCandles, volumeData);
+      }
+    });
+    
+    // Toggle volume visibility
+    document.getElementById('volume-toggle').addEventListener('click', function() {
+      volumeEnabled = !volumeEnabled;
+      this.textContent = volumeEnabled ? 'Volume ON' : 'Volume OFF';
+      this.classList.toggle('off', !volumeEnabled);
+      
+      volumeSeries.applyOptions({
+        visible: volumeEnabled
+      });
+    });
+    
+    // Timeframe switching
+    document.querySelectorAll('.timeframe-btn').forEach(btn => {
+      btn.addEventListener('click', function() {
+        document.querySelectorAll('.timeframe-btn').forEach(b => b.classList.remove('active'));
+        this.classList.add('active');
+        currentTimeframe = this.dataset.tf;
+        initChart();
+      });
+    });
+    
+    // Initialize
+    initChart();
+  </script>
+</body>
+</html>
